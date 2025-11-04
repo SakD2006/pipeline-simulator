@@ -12,7 +12,7 @@ const port = 3001;
 // Setup for file uploads
 const upload = multer({ dest: os.tmpdir() });
 
-app.use(cors()); // Allow requests from your React app
+app.use(cors()); // Allow requests from your React
 app.use(express.json()); // Parse JSON bodies
 
 // --- Endpoint to Generate Instructions ---
