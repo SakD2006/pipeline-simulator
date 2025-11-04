@@ -1,6 +1,6 @@
 'use client';
-import React, { useState, useEffect } from 'react';
-import { Play, Pause, SkipForward, RotateCcw, Plus, Zap, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Pause, SkipForward, RotateCcw, Plus, Zap, AlertCircle, Upload, FileText } from 'lucide-react';
 
 export default function PipelineVisualizer() {
   const [instructions, setInstructions] = useState([]);
@@ -10,6 +10,8 @@ export default function PipelineVisualizer() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [instructionCount, setInstructionCount] = useState(10);
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const fileInputRef = useRef(null);
   
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -17,17 +19,70 @@ export default function PipelineVisualizer() {
     setLoading(true);
     setError(null);
     try {
+      console.log('🔍 Generating instructions, API URL:', API_URL);
       const response = await fetch(`${API_URL}/api/generate-instructions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ count: instructionCount, complexity: 'medium' })
       });
+      
+      console.log('📡 Response status:', response.status);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
       const data = await response.json();
+      console.log('✅ Generated instructions:', data);
       setInstructions(data.instructions);
     } catch (err) {
+      console.error('❌ Generate error:', err);
       setError('Failed to generate instructions: ' + err.message);
     }
     setLoading(false);
+  };
+
+  const handleFileUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      console.log('📁 Uploading file:', file.name);
+      
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const response = await fetch(`${API_URL}/api/upload-file`, {
+        method: 'POST',
+        body: formData
+      });
+      
+      console.log('📡 Response status:', response.status);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`Upload failed: ${errorData.error || response.statusText}`);
+      }
+      
+      const data = await response.json();
+      console.log('✅ File uploaded:', data);
+      
+      setInstructions(data.instructions);
+      setUploadedFile(file.name);
+    } catch (err) {
+      console.error('❌ Upload error:', err);
+      setError('File upload failed: ' + err.message);
+    }
+    
+    setLoading(false);
+    
+    // Reset file input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   const runSimulation = async () => {
@@ -39,18 +94,33 @@ export default function PipelineVisualizer() {
     setLoading(true);
     setError(null);
     try {
+      console.log('🚀 Running simulation with', instructions.length, 'instructions');
+      console.log('📡 API URL:', `${API_URL}/api/simulate`);
+      
       const response = await fetch(`${API_URL}/api/simulate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ instructions })
       });
       
-      if (!response.ok) throw new Error('Simulation failed');
+      console.log('📡 Response status:', response.status);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`HTTP ${response.status}: ${errorData.error || response.statusText}`);
+      }
       
       const data = await response.json();
+      console.log('✅ Simulation result:', data);
+      
+      if (!data.result || !data.result.cycles) {
+        throw new Error('Invalid simulation data received');
+      }
+      
       setSimulationData(data.result);
       setCurrentCycle(0);
     } catch (err) {
+      console.error('❌ Simulation error:', err);
       setError('Simulation error: ' + err.message);
     }
     setLoading(false);
@@ -79,14 +149,15 @@ export default function PipelineVisualizer() {
   };
 
   return (
-    <div className="min-h-screen bg-linear-to-br from-gray-900 via-blue-900 to-gray-900 text-white p-8">
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-gray-900 text-white p-8">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="text-center mb-8">
-          <h1 className="text-5xl font-bold mb-2 bg-linear-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+          <h1 className="text-5xl font-bold mb-2 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
             CPU Pipeline Simulator
           </h1>
           <p className="text-gray-400">5-Stage Superscalar Out-of-Order Pipeline Visualization</p>
+          <p className="text-xs text-gray-500 mt-2">API: {API_URL || 'Not configured'}</p>
         </div>
 
         {/* Error Display */}
@@ -121,6 +192,24 @@ export default function PipelineVisualizer() {
               Generate
             </button>
 
+            <div className="relative">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt"
+                onChange={handleFileUpload}
+                className="hidden"
+                id="file-upload"
+              />
+              <label
+                htmlFor="file-upload"
+                className={`bg-purple-600 hover:bg-purple-700 px-6 py-2 rounded-lg font-semibold transition flex items-center gap-2 cursor-pointer ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                <Upload className="w-5 h-5" />
+                Upload .txt
+              </label>
+            </div>
+
             <button
               onClick={runSimulation}
               disabled={loading || instructions.length === 0}
@@ -130,6 +219,13 @@ export default function PipelineVisualizer() {
               Simulate
             </button>
           </div>
+
+          {uploadedFile && (
+            <div className="mt-4 p-3 bg-purple-500/20 border border-purple-500/50 rounded-lg flex items-center gap-2">
+              <FileText className="w-5 h-5 text-purple-400" />
+              <span className="text-sm text-purple-200">Loaded from: <span className="font-semibold">{uploadedFile}</span></span>
+            </div>
+          )}
 
           {instructions.length > 0 && (
             <div className="mt-4 p-3 bg-gray-900/50 rounded-lg">
@@ -199,7 +295,7 @@ export default function PipelineVisualizer() {
                     <div className={`${stageColors[stage]} px-4 py-2 rounded-lg font-semibold w-32 text-center`}>
                       {stage}
                     </div>
-                    <div className="flex-1 bg-gray-700/50 rounded-lg p-3 min-h-12 flex items-center gap-2">
+                    <div className="flex-1 bg-gray-700/50 rounded-lg p-3 min-h-[3rem] flex items-center gap-2">
                       {cycleData?.stages[stage]?.length > 0 ? (
                         cycleData.stages[stage].map((instr, i) => (
                           <div

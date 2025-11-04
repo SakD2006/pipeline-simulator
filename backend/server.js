@@ -4,10 +4,26 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const fs = require('fs').promises;
 const path = require('path');
+const multer = require('multer');
 
 const execPromise = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 1024 * 1024 // 1MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'text/plain' || file.originalname.endsWith('.txt')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only .txt files are allowed'));
+    }
+  }
+});
 
 // Middleware
 app.use(cors());
@@ -160,12 +176,16 @@ app.post('/api/simulate', async (req, res) => {
     const instructionText = instructions.join('\n');
     await fs.writeFile(tempFile, instructionText);
     
-    // Compile C++ if not already compiled
+    // Binary should already be compiled at startup
+    // Just verify it exists
     try {
-      await fs.access('./pipeline');
-    } catch {
-      console.log('Compiling C++ code...');
-      await execPromise('g++ -fopenmp pipeline.cpp -o pipeline');
+      await fs.access('./pipeline', fs.constants.X_OK);
+    } catch (err) {
+      console.error('❌ Pipeline binary not found! Server may not have initialized properly.');
+      return res.status(500).json({ 
+        error: 'Pipeline binary not available', 
+        message: 'Server initialization issue. Please contact administrator.' 
+      });
     }
     
     // Run simulation
@@ -224,6 +244,52 @@ app.post('/api/generate-instructions', (req, res) => {
   res.json({ instructions });
 });
 
+// Endpoint: Upload instruction file
+app.post('/api/upload-file', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+    
+    console.log(`📁 File uploaded: ${req.file.originalname} (${req.file.size} bytes)`);
+    
+    // Parse file content
+    const content = req.file.buffer.toString('utf-8');
+    const lines = content.split('\n');
+    const instructions = [];
+    
+    for (const line of lines) {
+      const trimmed = line.trim();
+      // Skip empty lines and comments
+      if (trimmed && !trimmed.startsWith('#')) {
+        instructions.push(trimmed);
+      }
+    }
+    
+    if (instructions.length === 0) {
+      return res.status(400).json({ 
+        error: 'No valid instructions found in file',
+        hint: 'File should contain instructions like: ADD R1 R2 R3'
+      });
+    }
+    
+    console.log(`✅ Parsed ${instructions.length} instructions from file`);
+    
+    res.json({ 
+      instructions,
+      filename: req.file.originalname,
+      count: instructions.length
+    });
+    
+  } catch (error) {
+    console.error('❌ File upload error:', error);
+    res.status(500).json({ 
+      error: 'File upload failed', 
+      message: error.message 
+    });
+  }
+});
+
 // Endpoint: Get cached simulation
 app.get('/api/simulation/:simId', (req, res) => {
   const { simId } = req.params;
@@ -241,14 +307,74 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Compile C++ at startup
+async function initializeServer() {
+  console.log('🔧 Initializing server...');
+  
+  try {
+    // Check if pipeline.cpp exists
+    await fs.access('pipeline.cpp');
+    console.log('✅ Found pipeline.cpp');
+  } catch {
+    console.error('❌ ERROR: pipeline.cpp not found!');
+    process.exit(1);
+  }
+  
+  try {
+    // Check if binary already exists
+    await fs.access('./pipeline', fs.constants.X_OK);
+    console.log('✅ Pipeline binary already compiled and executable');
+  } catch {
+    console.log('⚙️  Compiling pipeline.cpp...');
+    try {
+      const { stdout, stderr } = await execPromise('g++ -fopenmp pipeline.cpp -o pipeline');
+      if (stderr && !stderr.includes('warning')) {
+        console.error('⚠️  Compilation warnings:', stderr);
+      }
+      
+      // Verify compilation succeeded
+      await fs.access('./pipeline', fs.constants.X_OK);
+      console.log('✅ Compilation successful!');
+    } catch (err) {
+      console.error('❌ COMPILATION FAILED:', err.message);
+      console.error('   Make sure g++ is installed: apt-get install g++');
+      process.exit(1);
+    }
+  }
+  
+  // Test the binary
+  try {
+    console.log('🧪 Testing pipeline binary...');
+    // Create a minimal test file
+    await fs.writeFile('test_startup.txt', 'ADD R1 R2 R3');
+    const { stdout } = await execPromise('./pipeline test_startup.txt');
+    await fs.unlink('test_startup.txt');
+    
+    if (stdout.includes('PERFORMANCE STATISTICS') || stdout.includes('PIPELINE')) {
+      console.log('✅ Pipeline binary works correctly!');
+    } else {
+      console.warn('⚠️  Binary output looks unexpected');
+    }
+  } catch (err) {
+    console.error('⚠️  Binary test failed (may be normal):', err.message);
+  }
+  
+  console.log('🎉 Server initialization complete!\n');
+}
+
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Pipeline Simulator Backend running on port ${PORT}`);
-  console.log(`📊 API endpoints:`);
-  console.log(`   POST /api/simulate - Run simulation`);
-  console.log(`   POST /api/generate-instructions - Generate sample instructions`);
-  console.log(`   GET  /api/simulation/:simId - Get cached results`);
-  console.log(`   GET  /health - Health check`);
+initializeServer().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Pipeline Simulator Backend running on port ${PORT}`);
+    console.log(`📊 API endpoints:`);
+    console.log(`   POST /api/simulate - Run simulation`);
+    console.log(`   POST /api/generate-instructions - Generate sample instructions`);
+    console.log(`   GET  /api/simulation/:simId - Get cached results`);
+    console.log(`   GET  /health - Health check`);
+  });
+}).catch(err => {
+  console.error('💥 Server initialization failed:', err);
+  process.exit(1);
 });
 
 module.exports = app;
