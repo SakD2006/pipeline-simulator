@@ -31,6 +31,7 @@ app.use(express.json());
 
 // Store simulation results temporarily
 const simulationCache = new Map();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 // Generate unique ID for each simulation
 function generateSimId() {
@@ -75,8 +76,14 @@ function parseSimulationOutput(output) {
         const parts = line.split(':');
         if (parts.length >= 2) {
           const stage = parts[0].trim().replace('│', '').trim();
+          // Find all instruction IDs (e.g., I12, I3)
           const instructions = parts[1].match(/I\d+/g) || [];
-          currentCycle.stages[stage] = instructions;
+          // Find all stalled instructions (e.g., I4⚠)
+          const stalled = parts[1].match(/I\d+⚠/g) || [];
+          
+          const allInstructions = [...instructions, ...stalled.map(s => s.replace('⚠', ''))];
+          // Use a Set to remove duplicates if any, then convert back to array
+          currentCycle.stages[stage] = [...new Set(allInstructions)];
         }
       }
       
@@ -140,16 +147,23 @@ function parseSimulationOutput(output) {
     // Parse timeline
     if (line.includes('Instruction Timeline:')) {
       inTimelineBlock = true;
+      // Skip the header row
+      i++; 
+      continue;
     }
     
     if (inTimelineBlock && line.match(/I\d+\s+\|/)) {
       const parts = line.split('|').map(p => p.trim());
-      if (parts.length >= 4) {
+      
+      // *** CRITICAL FIX HERE ***
+      // We expect 5 columns: ID | Opcode | Issue | Complete | Total Cycles
+      if (parts.length >= 5) {
         timeline.push({
           id: parts[0],
-          issueCycle: parseInt(parts[1]) || -1,
-          completeCycle: parseInt(parts[2]) || -1,
-          totalCycles: parseInt(parts[3]) || 0
+          opcode: parts[1],
+          issueCycle: parseInt(parts[2]) || -1,
+          completeCycle: parseInt(parts[3]) || -1,
+          totalCycles: parseInt(parts[4]) || 0
         });
       }
     }
@@ -165,23 +179,27 @@ app.post('/api/simulate', async (req, res) => {
   try {
     const { instructions } = req.body;
     
-    if (!instructions || !Array.isArray(instructions)) {
-      return res.status(400).json({ error: 'Invalid instructions format' });
+    if (!instructions || !Array.isArray(instructions) || instructions.length === 0) {
+      return res.status(400).json({ error: 'Invalid or empty instructions format' });
     }
     
     const simId = generateSimId();
-    const tempFile = path.join(__dirname, `instructions_${simId}.txt`);
+    // Use OS's temporary directory for robustness
+    const tempDir = require('os').tmpdir();
+    const tempFile = path.join(tempDir, `instructions_${simId}.txt`);
     
     // Write instructions to temporary file
     const instructionText = instructions.join('\n');
     await fs.writeFile(tempFile, instructionText);
     
-    // Binary should already be compiled at startup
-    // Just verify it exists
+    // Determine binary path
+    const binaryPath = path.resolve(__dirname, 'pipeline');
+    
+    // Verify binary exists and is executable
     try {
-      await fs.access('./pipeline', fs.constants.X_OK);
+      await fs.access(binaryPath, fs.constants.X_OK);
     } catch (err) {
-      console.error('❌ Pipeline binary not found! Server may not have initialized properly.');
+      console.error('❌ Pipeline binary not found or not executable! Server may not have initialized properly.');
       return res.status(500).json({ 
         error: 'Pipeline binary not available', 
         message: 'Server initialization issue. Please contact administrator.' 
@@ -189,16 +207,32 @@ app.post('/api/simulate', async (req, res) => {
     }
     
     // Run simulation
-    const { stdout, stderr } = await execPromise(`./pipeline ${tempFile}`);
+    // Enclose tempFile in quotes to handle paths with spaces
+    const { stdout, stderr } = await execPromise(`"${binaryPath}" "${tempFile}"`);
     
     // Clean up temp file
-    await fs.unlink(tempFile);
+    try {
+      await fs.unlink(tempFile);
+    } catch (unlinkErr) {
+      console.warn(`⚠️  Could not delete temp file: ${tempFile}`, unlinkErr.message);
+    }
+
+    if (stderr) {
+      console.warn(`Simulation STDERR for ${simId}:`, stderr);
+    }
     
     // Parse output
     const result = parseSimulationOutput(stdout);
     
     // Cache result
     simulationCache.set(simId, result);
+    
+    // *** SUGGESTION FIX HERE ***
+    // Set a timer to automatically delete the cache entry after TTL
+    setTimeout(() => {
+      simulationCache.delete(simId);
+      console.log(`Cache expired and deleted for ${simId}`);
+    }, CACHE_TTL_MS);
     
     res.json({
       simId,
@@ -207,10 +241,12 @@ app.post('/api/simulate', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Simulation error:', error);
+    console.error(`❌ Simulation error for ${simId || 'N/A'}:`, error);
     res.status(500).json({ 
       error: 'Simulation failed', 
-      message: error.message 
+      message: error.message,
+      stdout: error.stdout,
+      stderr: error.stderr
     });
   }
 });
@@ -227,17 +263,28 @@ app.post('/api/generate-instructions', (req, res) => {
   
   const ops = opcodes[complexity] || opcodes.medium;
   const instructions = [];
+  const maxReg = 16;
   
+  // Create some potential dependencies
+  let lastDestReg = -1;
+
   for (let i = 0; i < count; i++) {
     const op = ops[Math.floor(Math.random() * ops.length)];
-    const r1 = Math.floor(Math.random() * 16);
-    const r2 = Math.floor(Math.random() * 16);
-    const r3 = Math.floor(Math.random() * 16);
+    const r1_dest = Math.floor(Math.random() * maxReg);
+    
+    // 50% chance to create a dependency
+    const r2_src1 = (lastDestReg !== -1 && Math.random() < 0.5) 
+                   ? lastDestReg 
+                   : Math.floor(Math.random() * maxReg);
+                   
+    const r3_src2 = Math.floor(Math.random() * maxReg);
     
     if (op === 'LOAD' || op === 'STORE') {
-      instructions.push(`${op} R${r1} R${r2}`);
+      instructions.push(`${op} R${r1_dest} R${r2_src1}`);
+      lastDestReg = (op === 'LOAD') ? r1_dest : -1; // Only LOAD creates a dependency
     } else {
-      instructions.push(`${op} R${r1} R${r2} R${r3}`);
+      instructions.push(`${op} R${r1_dest} R${r2_src1} R${r3_src2}`);
+      lastDestReg = r1_dest;
     }
   }
   
@@ -296,7 +343,7 @@ app.get('/api/simulation/:simId', (req, res) => {
   const result = simulationCache.get(simId);
   
   if (!result) {
-    return res.status(404).json({ error: 'Simulation not found' });
+    return res.status(404).json({ error: 'Simulation not found or has expired' });
   }
   
   res.json(result);
@@ -310,34 +357,38 @@ app.get('/health', (req, res) => {
 // Compile C++ at startup
 async function initializeServer() {
   console.log('🔧 Initializing server...');
+  const cppFile = 'pipeline_fixed.cpp'; // Assuming this is the name
+  const binaryFile = 'pipeline';
   
   try {
-    // Check if pipeline.cpp exists
-    await fs.access('pipeline.cpp');
-    console.log('✅ Found pipeline.cpp');
+    // Check if pipeline_fixed.cpp exists
+    await fs.access(cppFile);
+    console.log(`✅ Found ${cppFile}`);
   } catch {
-    console.error('❌ ERROR: pipeline.cpp not found!');
+    console.error(`❌ ERROR: ${cppFile} not found!`);
+    console.error('   Please add the C++ file to the backend directory.');
     process.exit(1);
   }
   
   try {
     // Check if binary already exists
-    await fs.access('./pipeline', fs.constants.X_OK);
-    console.log('✅ Pipeline binary already compiled and executable');
+    await fs.access(`./${binaryFile}`, fs.constants.X_OK);
+    console.log(`✅ Pipeline binary already compiled and executable`);
   } catch {
-    console.log('⚙️  Compiling pipeline.cpp...');
+    console.log(`⚙️  Compiling ${cppFile}...`);
     try {
-      const { stdout, stderr } = await execPromise('g++ -fopenmp pipeline.cpp -o pipeline');
-      if (stderr && !stderr.includes('warning')) {
-        console.error('⚠️  Compilation warnings:', stderr);
+      const { stdout, stderr } = await execPromise(`g++ -fopenmp ${cppFile} -o ${binaryFile} -O2`);
+      if (stderr) {
+        console.warn('⚠️  Compilation warnings/errors:', stderr);
       }
       
       // Verify compilation succeeded
-      await fs.access('./pipeline', fs.constants.X_OK);
+      await fs.access(`./${binaryFile}`, fs.constants.X_OK);
       console.log('✅ Compilation successful!');
     } catch (err) {
       console.error('❌ COMPILATION FAILED:', err.message);
-      console.error('   Make sure g++ is installed: apt-get install g++');
+      console.error('   Make sure g++ and OpenMP are installed.');
+      console.error('   (e.g., sudo apt-get install g++ libomp-dev)');
       process.exit(1);
     }
   }
@@ -346,17 +397,18 @@ async function initializeServer() {
   try {
     console.log('🧪 Testing pipeline binary...');
     // Create a minimal test file
-    await fs.writeFile('test_startup.txt', 'ADD R1 R2 R3');
-    const { stdout } = await execPromise('./pipeline test_startup.txt');
-    await fs.unlink('test_startup.txt');
+    const testFile = path.join(require('os').tmpdir(), 'test_startup.txt');
+    await fs.writeFile(testFile, 'ADD R1 R2 R3\nNOP');
+    const { stdout } = await execPromise(`"./${binaryFile}" "${testFile}"`);
+    await fs.unlink(testFile);
     
-    if (stdout.includes('PERFORMANCE STATISTICS') || stdout.includes('PIPELINE')) {
+    if (stdout.includes('PERFORMANCE STATISTICS')) {
       console.log('✅ Pipeline binary works correctly!');
     } else {
-      console.warn('⚠️  Binary output looks unexpected');
+      console.warn('⚠️  Binary output looks unexpected, check stdout:', stdout);
     }
   } catch (err) {
-    console.error('⚠️  Binary test failed (may be normal):', err.message);
+    console.error('⚠️  Binary test run failed:', err.message);
   }
   
   console.log('🎉 Server initialization complete!\n');
@@ -369,6 +421,7 @@ initializeServer().then(() => {
     console.log(`📊 API endpoints:`);
     console.log(`   POST /api/simulate - Run simulation`);
     console.log(`   POST /api/generate-instructions - Generate sample instructions`);
+    console.log(`   POST /api/upload-file - Upload instruction .txt file`);
     console.log(`   GET  /api/simulation/:simId - Get cached results`);
     console.log(`   GET  /health - Health check`);
   });
