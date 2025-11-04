@@ -203,10 +203,11 @@ struct Statistics {
     }
 };
 
-// --- (detectHazards is unchanged) ---
-bool detectHazards(const Instruction& instr, PipelineState& state,
-                   RegisterScoreboard& scoreboard, ExecutionUnits& units,
-                   int cycle, Statistics& stats) {
+// --- (detectHazards is MODIFIED) ---
+// NEW: This function now *only* checks for RAW hazards.
+// Structural hazards are checked separately in the ISSUE stage.
+bool detectRAWHazards(const Instruction& instr, PipelineState& state,
+                      RegisterScoreboard& scoreboard, int cycle, Statistics& stats) {
     bool hazard = false;
     string reason = "";
 
@@ -224,28 +225,20 @@ bool detectHazards(const Instruction& instr, PipelineState& state,
         stats.raw_hazards++;
     }
 
-    ExecUnit required = getExecUnit(instr.opcode);
-    if (!hazard && !units.isAvailable(required)) {
-        hazard = true;
-        reason = "Structural - " + unitToString(required) + " busy";
-        #pragma omp atomic
-        stats.structural_hazards++;
-    }
-
     if (hazard) {
         state.stalled = true;
         state.stall_reason = reason;
         #pragma omp atomic
         stats.total_stalls++;
-        return false;
+        return false; // Hazard detected
     }
 
     state.stalled = false;
     state.stall_reason = "";
-    return true;
+    return true; // No hazard
 }
 
-// NEW function to load instructions from a JSON string array
+// --- (loadInstructionsFromString and captureCycleState are unchanged) ---
 vector<Instruction> loadInstructionsFromString(const vector<string>& instruction_strings) {
     vector<Instruction> instructions;
     int id = 1;
@@ -296,14 +289,11 @@ vector<Instruction> loadInstructionsFromString(const vector<string>& instruction
     return instructions;
 }
 
-
-// NEW function to capture the pipeline state for a given cycle
 json captureCycleState(int cycle, const vector<Instruction>& instrs,
                        const vector<PipelineState>& states) {
     json cycle_data;
     cycle_data["cycle"] = cycle;
 
-    // A map to hold instructions for each stage
     map<string, vector<string>> stage_map;
     stage_map["FETCH"] = {};
     stage_map["DECODE"] = {};
@@ -334,7 +324,6 @@ json captureCycleState(int cycle, const vector<Instruction>& instrs,
 int main() {
     omp_set_num_threads(4);
 
-    // Read instruction list from standard input
     json input_json;
     try {
         cin >> input_json;
@@ -356,13 +345,10 @@ int main() {
         return 1;
     }
 
-    // Initialize simulation structures
     vector<PipelineState> states(instructions.size());
     RegisterScoreboard scoreboard(32);
     ExecutionUnits exec_units;
     Statistics stats;
-
-    // NEW: Vector to store the state of every cycle
     vector<json> cycle_history;
 
     int cycle = 0;
@@ -373,8 +359,7 @@ int main() {
     while (completed < instructions.size() && cycle < MAX_CYCLES) {
         cycle++;
         
-        // --- (All simulation logic stages: WRITEBACK, EXECUTE, ISSUE, DECODE, FETCH) ---
-        // --- (This logic is unchanged from your original file) ---
+        // --- (Writeback and Execute are unchanged) ---
 
         // WriteBack stage (parallel)
         #pragma omp parallel for schedule(dynamic)
@@ -410,30 +395,59 @@ int main() {
         }
         #pragma omp barrier
 
-        // Issue stage (sequential for resource allocation)
+
+        // -----------------------------------------------------------------
+        // LOGIC FIX: ISSUE stage now checks for BOTH RAW and STRUCTURAL
+        // hazards before issuing.
+        // -----------------------------------------------------------------
         for (int i = 0; i < instructions.size(); i++) {
             if (states[i].current_stage == ISSUE) {
-                ExecUnit unit = getExecUnit(instructions[i].opcode);
-                if (exec_units.allocate(unit)) {
-                    states[i].current_stage = EXECUTE;
-                    states[i].assigned_unit = unit;
-                    states[i].cycles_in_stage = 0;
-                    states[i].issue_cycle = cycle;
-                    int ready_at_cycle = cycle + getLatency(instructions[i].opcode);
-                    scoreboard.markBusy(instructions[i].dest, instructions[i].id, ready_at_cycle);
+                
+                // Step 1: Check for RAW (data) hazards.
+                // This function will set stall state if a RAW hazard exists.
+                if (detectRAWHazards(instructions[i], states[i], scoreboard, cycle, stats)) {
+                    
+                    // Step 2: NO RAW hazard. Now check for STRUCTURAL hazard.
+                    ExecUnit unit = getExecUnit(instructions[i].opcode);
+                    if (exec_units.isAvailable(unit)) {
+                        
+                        // Step 3: All clear! Allocate and move to EXECUTE.
+                        exec_units.allocate(unit);
+                        states[i].current_stage = EXECUTE;
+                        states[i].assigned_unit = unit;
+                        states[i].cycles_in_stage = 0;
+                        states[i].issue_cycle = cycle;
+                        states[i].stalled = false; // Clear any old stall
+
+                        int ready_at_cycle = cycle + getLatency(instructions[i].opcode);
+                        scoreboard.markBusy(instructions[i].dest, instructions[i].id, ready_at_cycle);
+                    
+                    } else {
+                        // STRUCTURAL hazard. Stall in ISSUE.
+                        states[i].stalled = true;
+                        states[i].stall_reason = "Structural - " + unitToString(unit) + " busy";
+                        #pragma omp atomic
+                        stats.structural_hazards++;
+                        #pragma omp atomic
+                        stats.total_stalls++;
+                    }
                 }
+                // If detectRAWHazards failed, it already set the stall
+                // state and we just stay in ISSUE.
             }
         }
 
-        // Decode stage (sequential for hazard detection)
+        // -----------------------------------------------------------------
+        // LOGIC FIX: DECODE stage is now just a simple promotion stage.
+        // All hazard logic is in ISSUE.
+        // -----------------------------------------------------------------
         for (int i = 0; i < instructions.size(); i++) {
             if (states[i].current_stage == DECODE) {
-                if (detectHazards(instructions[i], states[i], scoreboard,
-                                  exec_units, cycle, stats)) {
-                    states[i].current_stage = ISSUE;
-                }
+                states[i].current_stage = ISSUE;
             }
         }
+
+        // --- (Fetch and cycle capture are unchanged) ---
 
         // Fetch stage (parallel)
         #pragma omp parallel for schedule(dynamic)
@@ -455,9 +469,6 @@ int main() {
             }
         }
         
-        // -----------------------------------------------------------------
-        // NEW: Capture the state of this cycle and save it
-        // -----------------------------------------------------------------
         cycle_history.push_back(captureCycleState(cycle, instructions, states));
 
     } // End main simulation loop
@@ -467,12 +478,9 @@ int main() {
     stats.instructions_completed = completed;
     stats.calculate();
 
-    // -----------------------------------------------------------------
-    // NEW: Build the final JSON output
-    // -----------------------------------------------------------------
+    // --- (Final JSON output is unchanged) ---
     json final_result;
     
-    // Add stats
     json stats_json;
     stats_json["totalCycles"] = stats.total_cycles;
     stats_json["instructionsCompleted"] = stats.instructions_completed;
@@ -485,16 +493,13 @@ int main() {
     stats_json["branchMispredictions"] = stats.branch_mispredictions;
     
     final_result["stats"] = stats_json;
-    
-    // Add cycle history
     final_result["cycles"] = cycle_history;
 
-    // Create the final object format your UI expects
     json output;
     output["result"] = final_result;
 
-    // Print the single JSON object to standard output
     cout << output.dump(2) << endl;
 
     return 0;
 }
+
