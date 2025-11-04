@@ -16,7 +16,7 @@ COPY server.js .
 COPY pipeline.cpp .
 
 # Compile C++ code
-RUN g++ -fopenmp pipeline.cpp -o pipeline
+RUN g++ -fopenmp pipeline_fixed.cpp -o pipeline
 
 # Expose port
 EXPOSE 3001
