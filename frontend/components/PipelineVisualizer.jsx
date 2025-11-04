@@ -132,12 +132,12 @@ export default function PipelineVisualizer() {
   const isLoading = (action) => loading === action;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-950 to-gray-900 text-white p-4 md:p-8">
+    <div className="min-h-screen bg-linear-to-br from-gray-900 via-blue-950 to-gray-900 text-white p-4 md:p-8">
       <div className="max-w-8xl mx-auto">
         
         {/* Header */}
         <div className="text-center mb-8">
-          <h1 className="text-4xl md:text-5xl font-bold mb-2 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+          <h1 className="text-4xl md:text-5xl font-bold mb-2 bg-linear-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
             CPU Pipeline Simulator
           </h1>
           <p className="text-gray-400 text-sm md:text-base">5-Stage Superscalar Out-of-Order Pipeline Visualization</p>
@@ -366,7 +366,7 @@ function PipelineStagesDisplay({ cycleData }) {
             <div className={`${stageColors[stage]} px-4 py-2 rounded-lg font-semibold w-full sm:w-32 text-center`}>
               {stage}
             </div>
-            <div className="flex-1 bg-gray-700/50 rounded-lg p-3 min-h-[3.5rem] flex items-center gap-2 flex-wrap">
+            <div className="flex-1 bg-gray-700/50 rounded-lg p-3 min-h-14 flex items-center gap-2 flex-wrap">
               {cycleData?.stages[stage]?.length > 0 ? (
                 cycleData.stages[stage].map((instr, i) => (
                   <div

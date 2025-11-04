@@ -13,7 +13,7 @@ RUN npm install --production
 
 # Copy source files
 COPY server.js .
-COPY pipeline.cpp .
+COPY pipeline_fixed.cpp .
 
 # Compile C++ code
 RUN g++ -fopenmp pipeline_fixed.cpp -o pipeline
