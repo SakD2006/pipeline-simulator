@@ -1,0 +1,5 @@
+node_modules/
+pipeline
+*.exe
+instructions_*.txt
+.env
